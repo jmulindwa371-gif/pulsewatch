@@ -341,7 +341,12 @@ const LS = {
 // Wallet ("your bag") — on-chain balances via Blockscout (GET, CORS-friendly),
 // RPC balanceOf as fallback. Prices come from the DexScreener engine already loaded.
 const RPC = 'https://rpc.pulsechain.com';
+const RPCS = ['https://rpc.pulsechain.com','https://rpc-pulsechain.g4mm4.io','https://pulsechain-rpc.publicnode.com'];
 const SCAN_BASES = ['https://api.scan.pulsechain.com','https://scan.pulsechain.com'];
+// HEX staking: staked HEX isn't a wallet balance — read it from the HEX contract's stakeLists.
+const HEX_ADDR = '0x2b591e99afE9f32eAA6214f7B7629768c40Eeb39';
+const SEL_STAKECOUNT = '0x33060d90';   // stakeCount(address)
+const SEL_STAKELISTS = '0x2607443b';   // stakeLists(address,uint256)
 const BAG_ASSETS = [
   {sym:'PLS',  native:true,                                             dec:18, priceSym:'PLS'},
   {sym:'WPLS', addr:'0xA1077a294dDE1B09bB078844df40758a5D0f9a27',       dec:18, priceSym:'PLS'},
@@ -861,6 +866,36 @@ async function fetchWalletBalances(addr){
   }
   return {native:native, tokens:tokens};
 }
+// --- HEX staked balance: read straight from the HEX contract (staked HEX is not a wallet token) ---
+async function rpcMulti(method, params){
+  for(const url of RPCS){
+    try{
+      const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:method,params:params})});
+      if(!r.ok) continue;
+      const j=await r.json(); if(j.error) continue;
+      if(j.result!=null) return j.result;
+    }catch(e){}
+  }
+  throw new Error('RPC unreachable');
+}
+function pad32(hexNo0x){ return hexNo0x.padStart(64,'0'); }
+function stakedHeartsFromStake(hex){       // stakeLists getter returns 7 words; word[1] = stakedHearts
+  const h=(hex||'').replace(/^0x/,'');
+  if(h.length<128) return 0n;
+  try{ return BigInt('0x'+h.slice(64,128)); }catch(e){ return 0n; }
+}
+async function fetchHexStakes(addr){        // total staked HEX principal (8 decimals)
+  const a=addr.slice(2).toLowerCase();
+  let n=0;
+  try{ const cnt=await rpcMulti('eth_call',[{to:HEX_ADDR,data:SEL_STAKECOUNT+pad32(a)},'latest']); n=Number(BigInt(cnt||'0x0')); }catch(e){ return 0; }
+  if(!n) return 0;
+  n=Math.min(n,120);                        // safety cap
+  let hearts=0n;
+  for(let i=0;i<n;i++){
+    try{ const s=await rpcMulti('eth_call',[{to:HEX_ADDR,data:SEL_STAKELISTS+pad32(a)+pad32(i.toString(16))},'latest']); hearts+=stakedHeartsFromStake(s); }catch(e){}
+  }
+  return Number(hearts)/1e8;
+}
 function loadWalletDefs(){
   const raw=localStorage.getItem(LS.bag); if(!raw) return [];
   try{ const v=JSON.parse(raw); if(Array.isArray(v)) return v; }catch(e){}
@@ -886,6 +921,7 @@ async function refreshWallet(addr){
     const unpriced=(w.tokens||[]).filter(t=>knownPrice(t.addr)==null && !t.exRate)
       .sort((a,b)=>b.qty-a.qty).slice(0,12).map(t=>t.addr).filter(a=>/^0x[0-9a-f]{40}$/.test(a));
     if(unpriced.length) await lookupPrices(unpriced);
+    try{ w.hexStaked=await fetchHexStakes(addr); }catch(e){ w.hexStaked=0; }   // staked HEX (not a wallet balance)
   }catch(e){ w.loading=false; w.err=(e.message||'fetch failed')+' — RPC/explorer may have blocked the browser (CORS).'; }
   renderWallets();
 }
@@ -895,6 +931,7 @@ function toggleDust(addr){ const w=(state.wallets||[]).find(x=>x.addr===addr); i
 function valueWallet(w){
   const rows=[];
   if(w.native>0){ const p=((state.tokens.PLS||{}).price)||0; rows.push({sym:'PLS',qty:w.native,price:p,val:w.native*p,icon:((state.tokens.PLS||{}).img)||''}); }
+  if(w.hexStaked>0){ const hp=((state.tokens.HEX||{}).price)||0; rows.push({sym:'HEX (staked)',qty:w.hexStaked,price:hp,val:w.hexStaked*hp,icon:((state.tokens.HEX||{}).img)||'',staked:true}); }
   (w.tokens||[]).forEach(function(t){
     let p=knownPrice(t.addr); if(p==null) p=(t.exRate!=null?t.exRate:0);
     let img=''; const tk=CFG.tokens.find(x=>x.addr.toLowerCase()===t.addr);
