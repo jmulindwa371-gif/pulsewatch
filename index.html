@@ -347,6 +347,8 @@ const SCAN_BASES = ['https://api.scan.pulsechain.com','https://scan.pulsechain.c
 const HEX_ADDR = '0x2b591e99afE9f32eAA6214f7B7629768c40Eeb39';
 const SEL_STAKECOUNT = '0x33060d90';   // stakeCount(address)
 const SEL_STAKELISTS = '0x2607443b';   // stakeLists(address,uint256)
+const SEL_CURRENTDAY = '0x5c9302c9';   // currentDay()
+const SEL_DAILYRANGE = '0x6a210a0e';   // dailyDataRange(uint256,uint256)
 const BAG_ASSETS = [
   {sym:'PLS',  native:true,                                             dec:18, priceSym:'PLS'},
   {sym:'WPLS', addr:'0xA1077a294dDE1B09bB078844df40758a5D0f9a27',       dec:18, priceSym:'PLS'},
@@ -879,22 +881,50 @@ async function rpcMulti(method, params){
   throw new Error('RPC unreachable');
 }
 function pad32(hexNo0x){ return hexNo0x.padStart(64,'0'); }
-function stakedHeartsFromStake(hex){       // stakeLists getter returns 7 words; word[1] = stakedHearts
-  const h=(hex||'').replace(/^0x/,'');
-  if(h.length<128) return 0n;
-  try{ return BigInt('0x'+h.slice(64,128)); }catch(e){ return 0n; }
+function decodeStake(hex){                  // stakeLists getter returns 7 ABI words
+  const h=(hex||'').replace(/^0x/,''); if(h.length<7*64) return null;
+  const w=i=>BigInt('0x'+h.slice(i*64,(i+1)*64));
+  try{ return { hearts:w(1), shares:w(2), lockedDay:Number(w(3)), stakedDays:Number(w(4)) }; }catch(e){ return null; }
 }
-async function fetchHexStakes(addr){        // total staked HEX principal (8 decimals)
+function decodeDailyRange(hex){             // uint256[]; each packs dayPayoutTotal | dayStakeSharesTotal<<72
+  const h=(hex||'').replace(/^0x/,''); if(h.length<128) return [];
+  const len=Number(BigInt('0x'+h.slice(64,128))), MASK=(1n<<72n)-1n, out=[];
+  for(let i=0;i<len;i++){ const s=h.slice(128+i*64,128+(i+1)*64); if(s.length<64) break;
+    const v=BigInt('0x'+s); out.push({payout:v&MASK, shares:(v>>72n)&MASK}); }
+  return out;
+}
+// principal + interest-accrued-to-date across all of an address's HEX stakes (HEX has 8 decimals)
+async function fetchHexStakeData(addr){
   const a=addr.slice(2).toLowerCase();
   let n=0;
-  try{ const cnt=await rpcMulti('eth_call',[{to:HEX_ADDR,data:SEL_STAKECOUNT+pad32(a)},'latest']); n=Number(BigInt(cnt||'0x0')); }catch(e){ return 0; }
-  if(!n) return 0;
-  n=Math.min(n,120);                        // safety cap
-  let hearts=0n;
+  try{ const c=await rpcMulti('eth_call',[{to:HEX_ADDR,data:SEL_STAKECOUNT+pad32(a)},'latest']); n=Number(BigInt(c||'0x0')); }catch(e){ return {principal:0,yield:0}; }
+  if(!n) return {principal:0,yield:0};
+  n=Math.min(n,120);
+  const stakes=[];
   for(let i=0;i<n;i++){
-    try{ const s=await rpcMulti('eth_call',[{to:HEX_ADDR,data:SEL_STAKELISTS+pad32(a)+pad32(i.toString(16))},'latest']); hearts+=stakedHeartsFromStake(s); }catch(e){}
+    try{ const s=await rpcMulti('eth_call',[{to:HEX_ADDR,data:SEL_STAKELISTS+pad32(a)+pad32(i.toString(16))},'latest']);
+      const st=decodeStake(s); if(st && st.hearts>0n) stakes.push(st); }catch(e){}
   }
-  return Number(hearts)/1e8;
+  if(!stakes.length) return {principal:0,yield:0};
+  let principalH=0n; stakes.forEach(s=>principalH+=s.hearts);
+  // interest = Σ over each active day of  dayPayoutTotal * stakeShares / dayStakeSharesTotal
+  let yieldH=0n;
+  try{
+    const cd=Number(BigInt(await rpcMulti('eth_call',[{to:HEX_ADDR,data:SEL_CURRENTDAY},'latest'])));
+    const minLock=Math.min.apply(null, stakes.map(s=>s.lockedDay));
+    if(cd>minLock){
+      let days=[], endUsed=cd;
+      for(const end of [cd, cd-1]){
+        try{ const r=await rpcMulti('eth_call',[{to:HEX_ADDR,data:SEL_DAILYRANGE+pad32(minLock.toString(16))+pad32(end.toString(16))},'latest']);
+          const dd=decodeDailyRange(r); if(dd.length){ days=dd; endUsed=end; break; } }catch(e){}
+      }
+      stakes.forEach(s=>{
+        const start=s.lockedDay, end=Math.min(endUsed, s.lockedDay+s.stakedDays);
+        for(let d=start; d<end; d++){ const dd=days[d-minLock]; if(!dd||dd.shares===0n) continue; yieldH += dd.payout*s.shares/dd.shares; }
+      });
+    }
+  }catch(e){ /* yield stays 0 -> principal-only row */ }
+  return { principal: Number(principalH)/1e8, yield: Number(yieldH)/1e8 };
 }
 function loadWalletDefs(){
   const raw=localStorage.getItem(LS.bag); if(!raw) return [];
@@ -921,7 +951,7 @@ async function refreshWallet(addr){
     const unpriced=(w.tokens||[]).filter(t=>knownPrice(t.addr)==null && !t.exRate)
       .sort((a,b)=>b.qty-a.qty).slice(0,12).map(t=>t.addr).filter(a=>/^0x[0-9a-f]{40}$/.test(a));
     if(unpriced.length) await lookupPrices(unpriced);
-    try{ w.hexStaked=await fetchHexStakes(addr); }catch(e){ w.hexStaked=0; }   // staked HEX (not a wallet balance)
+    try{ w.hexStake=await fetchHexStakeData(addr); }catch(e){ w.hexStake=null; }   // staked HEX + yield (not a wallet balance)
   }catch(e){ w.loading=false; w.err=(e.message||'fetch failed')+' — RPC/explorer may have blocked the browser (CORS).'; }
   renderWallets();
 }
@@ -931,7 +961,8 @@ function toggleDust(addr){ const w=(state.wallets||[]).find(x=>x.addr===addr); i
 function valueWallet(w){
   const rows=[];
   if(w.native>0){ const p=((state.tokens.PLS||{}).price)||0; rows.push({sym:'PLS',qty:w.native,price:p,val:w.native*p,icon:((state.tokens.PLS||{}).img)||''}); }
-  if(w.hexStaked>0){ const hp=((state.tokens.HEX||{}).price)||0; rows.push({sym:'HEX (staked)',qty:w.hexStaked,price:hp,val:w.hexStaked*hp,icon:((state.tokens.HEX||{}).img)||'',staked:true}); }
+  if(w.hexStake && w.hexStake.principal>0){ const hp=((state.tokens.HEX||{}).price)||0; const y=w.hexStake.yield||0;
+    rows.push({sym:'HEX (staked)',qty:w.hexStake.principal,yield:y,price:hp,val:(w.hexStake.principal+y)*hp,icon:((state.tokens.HEX||{}).img)||'',staked:true}); }
   (w.tokens||[]).forEach(function(t){
     let p=knownPrice(t.addr); if(p==null) p=(t.exRate!=null?t.exRate:0);
     let img=''; const tk=CFG.tokens.find(x=>x.addr.toLowerCase()===t.addr);
@@ -972,8 +1003,9 @@ function renderWallets(){
     const rowHtml=function(r){
       const color=((CFG.tokens.find(t=>t.sym===r.sym)||{}).color)||'#4b3f73';
       const ic=r.icon?'<img src="'+escapeHtml(r.icon)+'" alt="" loading="lazy" onerror="this.remove()"/>':'';
+      const qtyTxt=fmtQty(r.qty)+((r.staked&&r.yield>0)?' <span style="color:var(--green)">+ '+fmtQty(r.yield)+' yield</span>':'');
       return '<div class="bag-row"><div class="tok-ic" style="width:28px;height:28px;font-size:10px;background:'+color+'">'+escapeHtml((r.sym||'?').slice(0,3))+ic+'</div>'
-        +'<div class="bag-q"><b>'+escapeHtml(r.sym||'?')+'</b> · '+fmtQty(r.qty)+'</div>'
+        +'<div class="bag-q"><b>'+escapeHtml(r.sym||'?')+'</b> · '+qtyTxt+'</div>'
         +'<div class="bag-v">'+(r.val>0?fmtUsd(r.val):'<span class="bag-pct">no market</span>')+'</div></div>';
     };
     const pricedRows=v.rows.filter(r=>r.val>0), dust=v.rows.filter(r=>!(r.val>0));
