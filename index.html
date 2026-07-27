@@ -370,7 +370,7 @@ const cls = p=> p>0.05?'up':p<-0.05?'down':'flat';
 const now = ()=>Date.now();
 const ago = ts=>{const s=(now()-ts)/1000; if(s<60)return Math.round(s)+'s ago'; if(s<3600)return Math.round(s/60)+'m ago'; if(s<86400)return Math.round(s/3600)+'h ago'; return Math.round(s/86400)+'d ago';};
 
-let state = { tokens:{}, tvl:null, sentiment:50, wallets:[], priceCache:{}, walletErr:null, walletsLoaded:false };
+let state = { tokens:{}, tvl:null, sentiment:50, wallets:[], priceCache:{}, iconCache:{}, walletErr:null, walletsLoaded:false };
 let charts = { tvl:null, sparks:{} };
 let tvlDays = 180;
 let sortBy = 'sentiment';
@@ -822,9 +822,12 @@ function knownPrice(addrLower){
 async function lookupPrices(addrs){
   for(const a of addrs){
     if(a in state.priceCache) continue;
-    try{ const pairs=await pairsFor(a,''); let liq=0,pw=0;
-      pairs.forEach(p=>{const l=+((p.liquidity||{}).usd||0),pr=+(p.priceUsd||0); if(pr>0&&l>0){pw+=pr*l;liq+=l;}});
+    try{ const pairs=await pairsFor(a,''); let liq=0,pw=0,bestLiq=-1,img='';
+      pairs.forEach(p=>{const l=+((p.liquidity||{}).usd||0),pr=+(p.priceUsd||0);
+        if(pr>0&&l>0){pw+=pr*l;liq+=l;}
+        if(p.info&&p.info.imageUrl&&l>=bestLiq){bestLiq=l;img=p.info.imageUrl;}});
       state.priceCache[a]= liq>0?pw/liq:(pairs[0]?+(pairs[0].priceUsd||0):0);
+      if(img) state.iconCache[a]=img;
     }catch(e){ state.priceCache[a]=0; }
   }
 }
@@ -894,8 +897,10 @@ function valueWallet(w){
   if(w.native>0){ const p=((state.tokens.PLS||{}).price)||0; rows.push({sym:'PLS',qty:w.native,price:p,val:w.native*p,icon:((state.tokens.PLS||{}).img)||''}); }
   (w.tokens||[]).forEach(function(t){
     let p=knownPrice(t.addr); if(p==null) p=(t.exRate!=null?t.exRate:0);
-    let img=t.icon||''; const tk=CFG.tokens.find(x=>x.addr.toLowerCase()===t.addr);
-    if(tk && state.tokens[tk.sym] && state.tokens[tk.sym].img) img=state.tokens[tk.sym].img;
+    let img=''; const tk=CFG.tokens.find(x=>x.addr.toLowerCase()===t.addr);
+    if(tk && state.tokens[tk.sym] && state.tokens[tk.sym].img) img=state.tokens[tk.sym].img;  // tracked logo
+    else if(t.icon) img=t.icon;                          // explorer icon
+    else if(state.iconCache[t.addr]) img=state.iconCache[t.addr];  // DexScreener logo
     rows.push({sym:t.sym,qty:t.qty,price:p,val:t.qty*p,icon:img});
   });
   const total=rows.reduce((s,r)=>s+r.val,0);
@@ -989,9 +994,10 @@ async function refresh(){
   localStorage.setItem(LS.snap,JSON.stringify(curSnap));
   pushHist();
 
+  state.lastUpdate=Date.now();
   const stamp=new Date();
   $('#lastUpd').textContent='Last updated '+stamp.toLocaleString();
-  setStatus('ok','live · '+stamp.toLocaleTimeString());
+  setStatus('ok','live · updated 0s ago');
   countdown=CFG.refreshMs/1000;
 }
 function setStatus(k,txt){ const d=$('#statusDot'); d.className='dot'+(k==='err'?' err':k==='loading'?' stale':'');
@@ -1019,7 +1025,15 @@ function initControls(){
   renderAlertFeed();
   renderWallets();
 }
-function tick(){ countdown--; if(countdown<=0){refresh();} $('#countdown').textContent=Math.max(0,Math.round(countdown)); }
+function tick(){
+  countdown--; if(countdown<=0){refresh();}
+  $('#countdown').textContent=Math.max(0,Math.round(countdown));
+  // live "updated Ns ago" freshness readout (ticks every second)
+  const d=$('#statusDot');
+  if(state.lastUpdate && d && !d.classList.contains('err') && !d.classList.contains('stale')){
+    $('#statusText').textContent='live · updated '+ago(state.lastUpdate);
+  }
+}
 
 initControls();
 refresh();
