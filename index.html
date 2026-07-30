@@ -333,7 +333,7 @@ const CFG = {
   priceStepPct: 3,     // price moved >=3% since last check
   volSpike: 1.5,       // 24h volume >=1.5x last check
   liqStepPct: 15,      // liquidity moved >=15%
-  athMilestones: [2,5,10,25,50,100,320],
+  athMilestones: [2,5,10,25,50,100],  // intermediate rungs; the ATH rung is drawn separately at the real high
 };
 
 const LS = {
@@ -557,21 +557,24 @@ function renderHero(){
   const fill=Math.max(2, posOf(d.price));       // small "you are here" nub at the start
   $('#roadFill').style.width = fill.toFixed(1)+'%';
   const ticks=$('#roadTicks'), ms=$('#milestones'); ticks.innerHTML=''; ms.innerHTML='';
-  const last=CFG.athMilestones[CFG.athMilestones.length-1];
   CFG.athMilestones.forEach(m=>{
-    if(m>=mult && m!==last) return;             // skip rungs already beyond ATH
-    const target=d.price*m, pos=posOf(target), isATH=(m>=mult||pos>=99.5);
+    if(m>=mult) return;                         // skip rungs at/beyond the real ATH
+    const pos=posOf(d.price*m);
     const tk=document.createElement('div'); tk.className='rtick'; tk.style.left=pos+'%'; ticks.appendChild(tk);
     const el=document.createElement('div'); el.className='ms';
     el.style.left=pos+'%'; el.style.transform='translateX('+(pos<=4?'0':pos>=96?'-100%':'-50%')+')';
-    el.innerHTML=(isATH?'ATH':m+'×')+'<span class="tick">'+fmtPrice(target)+'</span>';
+    el.innerHTML=m+'×<span class="tick">'+fmtPrice(d.price*m)+'</span>';
     ms.appendChild(el);
   });
+  // ATH rung at the REAL all-time high (mult×), pinned to 100% with the true ATH price
+  const athTk=document.createElement('div'); athTk.className='rtick'; athTk.style.left='100%'; ticks.appendChild(athTk);
+  const athEl=document.createElement('div'); athEl.className='ms'; athEl.style.left='100%'; athEl.style.transform='translateX(-100%)';
+  athEl.innerHTML='ATH<span class="tick">'+fmtPrice(CFG.athPLS)+'</span>'; ms.appendChild(athEl);
   const nowEl=document.createElement('div'); nowEl.className='ms now'; nowEl.style.left='0%'; nowEl.style.transform='translateX(0)';
   nowEl.innerHTML='now·1×<span class="tick">'+fmtPrice(d.price)+'</span>'; ms.appendChild(nowEl);
-  const nextMs = CFG.athMilestones.find(m=>m<mult) || CFG.athMilestones[0];
+  const nextMs = CFG.athMilestones.find(m=>m<mult);
   $('#roadNote').innerHTML = `A ${mult>=1?Math.round(mult):mult.toFixed(1)}× round-trip stands between here and the old high. `+
-    `Next rung: <b style="color:var(--gold)">${nextMs>=320?'ATH':nextMs+'×'}</b> at ${fmtPrice(d.price*nextMs)}. `+
+    `Next rung: <b style="color:var(--gold)">${nextMs?nextMs+'×':'ATH'}</b> at ${fmtPrice(nextMs?d.price*nextMs:CFG.athPLS)}. `+
     `Read it against liquidity (${fmtUsd(d.liq)}) — thin books move on small money.`;
 }
 
