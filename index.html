@@ -60,9 +60,12 @@
   .road-track{height:14px;background:#0e0a1c;border:1px solid var(--line);border-radius:20px;overflow:hidden;position:relative}
   .road-fill{height:100%;background:linear-gradient(90deg,var(--pink),var(--purple),var(--cyan));border-radius:20px;
         box-shadow:0 0 16px rgba(139,92,246,.6);transition:width 1s ease}
-  .milestones{display:flex;justify-content:space-between;margin-top:8px;position:relative}
-  .ms{font-size:10px;color:var(--dim2);text-align:center;flex:1;position:relative}
+  #roadTicks{position:absolute;inset:0;pointer-events:none}
+  .rtick{position:absolute;top:0;bottom:0;width:2px;background:rgba(255,255,255,.22);transform:translateX(-50%)}
+  .milestones{position:relative;height:32px;margin-top:8px}
+  .ms{position:absolute;top:0;font-size:10px;color:var(--dim2);text-align:center;white-space:nowrap;line-height:1.35}
   .ms.reached{color:var(--gold);font-weight:700}
+  .ms.now{color:var(--cyan);font-weight:800}
   .ms .tick{display:block;font-size:9px;color:var(--dim2)}
   .road-note{margin-top:12px;font-size:12.5px;color:var(--dim);border-left:2px solid var(--purple);padding-left:10px}
   /* grid layout */
@@ -225,7 +228,7 @@
       </div>
     </div>
     <div class="road">
-      <div class="road-track"><div class="road-fill" id="roadFill" style="width:0%"></div></div>
+      <div class="road-track"><div class="road-fill" id="roadFill" style="width:0%"></div><div id="roadTicks"></div></div>
       <div class="milestones" id="milestones"></div>
       <div class="road-note" id="roadNote">Loading live price from PulseX…</div>
     </div>
@@ -547,21 +550,25 @@ function renderHero(){
   const pctBelow = (1-d.price/CFG.athPLS)*100;
   $('#athMult').textContent = mult>=1 ? Math.round(mult)+'×' : mult.toFixed(2)+'×';
   $('#athPct').textContent = pctBelow.toFixed(1)+'% below ATH ('+fmtPrice(CFG.athPLS)+')';
-  // road fill: log scale from launch-ish floor to ATH so movement is visible
-  const floor = CFG.athPLS/1000; // ~99.9% down anchor
-  const lf=Math.log10(floor), la=Math.log10(CFG.athPLS), lp=Math.log10(Math.max(d.price,floor));
-  const fill = Math.max(1,Math.min(100,(lp-lf)/(la-lf)*100));
+  // road: ONE log scale, 0% = current price (now / 1×), 100% = ATH. Rungs and the fill
+  // share this scale so they line up. PLS at 1× correctly sits at the very start.
+  const lf=Math.log10(d.price), la=Math.log10(CFG.athPLS), denom=(la-lf)||1;
+  const posOf=t=>Math.max(0,Math.min(100,(Math.log10(t)-lf)/denom*100));
+  const fill=Math.max(2, posOf(d.price));       // small "you are here" nub at the start
   $('#roadFill').style.width = fill.toFixed(1)+'%';
-  // milestones
-  const ms=$('#milestones'); ms.innerHTML='';
+  const ticks=$('#roadTicks'), ms=$('#milestones'); ticks.innerHTML=''; ms.innerHTML='';
+  const last=CFG.athMilestones[CFG.athMilestones.length-1];
   CFG.athMilestones.forEach(m=>{
-    const target = d.price*m;
-    const reached = target<=CFG.athPLS && mult<=m; // current multiple already below this milestone's multiple
-    const el=document.createElement('div');
-    el.className='ms'+(mult<=m?' reached':'');
-    el.innerHTML = (m>=320?'ATH':m+'×')+'<span class="tick">'+fmtPrice(d.price*m)+'</span>';
+    if(m>=mult && m!==last) return;             // skip rungs already beyond ATH
+    const target=d.price*m, pos=posOf(target), isATH=(m>=mult||pos>=99.5);
+    const tk=document.createElement('div'); tk.className='rtick'; tk.style.left=pos+'%'; ticks.appendChild(tk);
+    const el=document.createElement('div'); el.className='ms';
+    el.style.left=pos+'%'; el.style.transform='translateX('+(pos<=4?'0':pos>=96?'-100%':'-50%')+')';
+    el.innerHTML=(isATH?'ATH':m+'×')+'<span class="tick">'+fmtPrice(target)+'</span>';
     ms.appendChild(el);
   });
+  const nowEl=document.createElement('div'); nowEl.className='ms now'; nowEl.style.left='0%'; nowEl.style.transform='translateX(0)';
+  nowEl.innerHTML='now·1×<span class="tick">'+fmtPrice(d.price)+'</span>'; ms.appendChild(nowEl);
   const nextMs = CFG.athMilestones.find(m=>m<mult) || CFG.athMilestones[0];
   $('#roadNote').innerHTML = `A ${mult>=1?Math.round(mult):mult.toFixed(1)}× round-trip stands between here and the old high. `+
     `Next rung: <b style="color:var(--gold)">${nextMs>=320?'ATH':nextMs+'×'}</b> at ${fmtPrice(d.price*nextMs)}. `+
